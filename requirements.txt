@@ -9,3 +9,4 @@ supabase
 python-dotenv
 tqdm
 scipy
+streamlit
