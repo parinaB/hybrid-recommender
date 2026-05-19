@@ -634,116 +634,67 @@ def list_items(page: int = 1, per_page: int = 50):
     }
 
 
-# ── Trending ───────────────────────────────────────────────────────
+# ── Similarity Matrix ──────────────────────────────────────────────
 
-@app.get("/api/trending")
-def get_trending(days: int = Query(7, ge=1, le=30), limit: int = Query(10, ge=1, le=50)):
-    """Return currently trending products based on recent interactions."""
-    cache_key = (days, limit)
-    now_ts = time.time()
-    cached = trending_cache.get(cache_key)
-    if cached and now_ts - cached["ts"] < TRENDING_CACHE_TTL:
-        return cached["data"]
+@app.get("/api/similarity-matrix")
+def similarity_matrix(items: str = Query(..., description="Comma-separated product titles")):
+    """Compute an NxN cosine similarity matrix for the given product titles.
 
-    try:
-        sb = get_supabase_admin()
-    except RuntimeError:
-        sb = get_supabase()
+    Uses the content model's TF-IDF vectors to calculate pairwise cosine
+    similarity scores.  Accepts up to 20 items to keep response size
+    manageable.
 
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    cutoff_iso = cutoff.isoformat() + 'Z'
+    Example::
 
-    recent_rows = []
-    page_size = 1000
-    start = 0
-    while True:
-        result = sb.table('purchases') \
-            .select('product_id, rating, purchased_at') \
-            .gte('purchased_at', cutoff_iso) \
-            .range(start, start + page_size - 1) \
-            .execute()
-        batch = result.data or []
-        recent_rows.extend(batch)
-        if len(batch) < page_size:
-            break
-        start += page_size
+        GET /api/similarity-matrix?items=ProductA,ProductB,ProductC
+    """
+    if not models["ready"] or models["content"] is None:
+        raise HTTPException(400, "Models not built. Build first via /api/build.")
 
-    if not recent_rows:
-        data = {"results": [], "total": 0, "days": days, "limit": limit}
-        trending_cache[cache_key] = {"ts": now_ts, "data": data}
-        return data
+    titles = [t.strip() for t in items.split(",") if t.strip()]
+    if len(titles) < 2:
+        raise HTTPException(400, "Provide at least 2 comma-separated item titles.")
+    if len(titles) > 20:
+        raise HTTPException(400, "Maximum 20 items allowed per request.")
 
-    product_stats = {}
-    for row in recent_rows:
-        pid = row.get('product_id')
-        if pid is None:
-            continue
-        product_stats.setdefault(pid, {
-            'count': 0,
-            'rating_sum': 0.0,
-            'rating_count': 0,
-        })
-        product_stats[pid]['count'] += 1
-        rating = row.get('rating')
-        if isinstance(rating, (int, float)):
-            product_stats[pid]['rating_sum'] += float(rating)
-            product_stats[pid]['rating_count'] += 1
+    content_model = models["content"]
+    from sklearn.metrics.pairwise import cosine_similarity as cos_sim
 
-    product_ids = list(product_stats.keys())
-    product_meta = {}
-    if product_ids:
-        meta_result = sb.table('products') \
-            .select('id, title, description, category, rating, avg_sentiment, review_count') \
-            .in_('id', product_ids) \
-            .execute()
-        for p in meta_result.data or []:
-            product_meta[p['id']] = p
+    # Resolve indices and filter out unknown titles
+    indices = []
+    valid_titles = []
+    not_found = []
+    for title in titles:
+        idx = content_model._title_to_idx.get(title.lower())
+        if idx is not None:
+            indices.append(idx)
+            valid_titles.append(content_model.df.iloc[idx]['title'])  # canonical case
+        else:
+            not_found.append(title)
 
-    avg_ratings = [
-        stats['rating_sum'] / stats['rating_count']
-        for stats in product_stats.values()
-        if stats['rating_count'] > 0
-    ]
-    global_avg = sum(avg_ratings) / len(avg_ratings) if avg_ratings else 3.0
-
-    max_count = max((stats['count'] for stats in product_stats.values()), default=1)
-
-    results = []
-    for pid, stats in product_stats.items():
-        meta = product_meta.get(pid, {})
-        avg_rating = (
-            stats['rating_sum'] / stats['rating_count']
-            if stats['rating_count'] > 0 else 0.0
+    if len(valid_titles) < 2:
+        raise HTTPException(
+            404,
+            f"Need at least 2 valid items. Not found: {not_found}",
         )
-        bayes = bayesian_rating(avg_rating, stats['count'], global_avg=global_avg)
-        popularity_norm = stats['count'] / max_count if max_count else 0.0
-        trending_score = 0.7 * (bayes / 5.0) + 0.3 * popularity_norm
 
-        results.append({
-            'id': pid,
-            'title': meta.get('title') or f'Product {pid}',
-            'description': str(meta.get('description', ''))[:180],
-            'category': meta.get('category', ''),
-            'rating': round(avg_rating, 2),
-            'bayesian_rating': round(bayes, 2),
-            'interaction_count': stats['count'],
-            'avg_sentiment': meta.get('avg_sentiment', 0.0),
-            'product_rating': round(float(meta.get('rating', 0.0)), 2),
-            'review_count': meta.get('review_count', 0),
-            'trending_score': round(trending_score, 4),
-        })
+    # Compute NxN similarity from the TF-IDF matrix rows
+    sub_matrix = content_model.matrix[indices]
+    sim = cos_sim(sub_matrix, sub_matrix)
 
-    results.sort(key=lambda item: item['trending_score'], reverse=True)
-    results = results[:limit]
+    # Build JSON-serializable matrix (rounded to 4 decimals)
+    matrix = [[round(float(sim[i][j]), 4) for j in range(len(valid_titles))]
+              for i in range(len(valid_titles))]
 
-    data = {
-        'results': results,
-        'total': len(results),
-        'days': days,
-        'limit': limit,
+    result = {
+        "labels": valid_titles,
+        "matrix": matrix,
+        "size": len(valid_titles),
     }
-    trending_cache[cache_key] = {"ts": now_ts, "data": data}
-    return data
+    if not_found:
+        result["not_found"] = not_found
+
+    return result
 
 
 # ── Categories ──────────────────────────────────────────────────────
