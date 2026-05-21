@@ -722,8 +722,15 @@ async function loadRecommendations(title) {
     els.recsStrip.innerHTML = '';
 
     try {
-        if (!requestRealtimeRecommendations(title)) {
-            await fallbackRecommendationRequest(title);
+        const data = await API.get(`/api/recommend?title=${encodeURIComponent(title)}&top_n=12`);
+        const recs = data.recommendations || [];
+
+        els.recsLoader.hidden = true;
+        els.recsStrip.hidden = false;
+
+        if (!recs.length) {
+            els.recsStrip.innerHTML = '<div style="padding:16px;color:var(--text-muted);">No recommendations found.</div>';
+            return;
         }
     } catch {
         try {

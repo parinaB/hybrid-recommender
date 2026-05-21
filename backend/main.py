@@ -662,65 +662,25 @@ def build_models():
 
 # ── Recommendations ────────────────────────────────────────────────
 
+@app.get("/api/recommend")
 @app.get("/api/recommend/{item_title}")
 def get_recommendations(
-    response: Response,
-    item_title: str,
+    item_title: Optional[str] = None,
+    title: Optional[str] = Query(None, description="Item title to recommend from."),
     top_n: int = 10,
     explain: bool = Query(False),
-    llm_explain: bool = Query(False),
 ):
-    """Get hybrid recommendations for an item with optional LLM explanations."""
-    return _recommendation_payload(
-        item_title,
-        top_n=top_n,
-        explain=explain,
-        llm_explain=llm_explain,
-        response=response,
-    )
-
-
-def _recommendation_payload(
-    item_title: str,
-    top_n: int = 10,
-    explain: bool = False,
-    llm_explain: bool = False,
-    response: Response | None = None,
-):
-    """Build a recommendation response shared by HTTP and real-time transports."""
+    """Get hybrid recommendations for an item."""
     if not models["ready"]:
         raise HTTPException(400, "Models not built. Build first via /api/build.")
-    weights = models["hybrid"].get_weights()
-    cache_key = _cache_key(
-        "recommend",
-        item_title,
-        top_n,
-        explain,
-        llm_explain,
-        weights.get("alpha"),
-        weights.get("beta"),
-        weights.get("gamma"),
-    )
-    cached = _get_cached_response(cache_key)
-    if cached is not None:
-        if response is not None:
-            _set_cache_headers(response, "HIT")
-        return cached
-
-    recs = models["hybrid"].recommend(item_title, top_n=top_n, explain=explain)
+    query_title = title or item_title
+    if not query_title:
+        raise HTTPException(422, "Query parameter 'title' is required.")
+    recs = models["hybrid"].recommend(query_title, top_n=top_n, explain=explain)
     if not recs:
         raise HTTPException(404, "Item not found or no recommendations.")
-
-    # Add LLM explanations if requested
-    if llm_explain:
-        try:
-            explainer = get_explainer()
-            recs = explainer.explain_multiple(recs, item_title)
-        except Exception as e:
-            logger.warning(f"LLM explanation failed: {e}. Returning recommendations without LLM explanations.")
-
-    payload = {
-        "query_item": item_title,
+    return {
+        "query_item": query_title,
         "recommendations": recs,
         "weights": weights,
         "explain": explain,
