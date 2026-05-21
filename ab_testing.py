@@ -1,265 +1,156 @@
 """
-A/B Testing Module — Compare Recommendation Weight Configurations
+A/B testing helpers for recommendation ranking experiments.
 
-Runs two weight configurations (A and B) through the hybrid recommender
-and measures precision@K, recall@K, and diversity score to determine
-which configuration produces better recommendations.
+The framework keeps user assignment deterministic and temporarily applies
+variant weights while preserving the recommender's configured defaults.
 """
-import os
-import sys
-import numpy as np
-from datetime import datetime
+from __future__ import annotations
 
-sys.path.insert(0, os.path.dirname(__file__))
-
-from evaluation import precision_at_k, recall_at_k, ndcg_at_k
-from hybrid_model import HybridRecommender
+import hashlib
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Mapping
 
 
-class ABTestRunner:
-    """Run A/B tests comparing two hybrid recommender weight configurations.
+DEFAULT_EXPERIMENT_ID = "recommendation-ranking-v1"
 
-    Parameters
-    ----------
-    content_model : ContentRecommender
-        Trained content-based recommender.
-    collab_model : CollaborativeRecommender or None
-        Trained collaborative recommender (may be None).
-    item_df : pd.DataFrame
-        Item metadata dataframe with titles, categories, ratings, etc.
-    config_a : dict
-        Config A weights: ``{"alpha": 0.5, "beta": 0.3, "gamma": 0.2}``.
-    config_b : dict
-        Config B weights: ``{"alpha": 0.3, "beta": 0.5, "gamma": 0.2}``.
-    k : int
-        Number of top recommendations to evaluate (default 10).
-    """
 
-    DEFAULT_CONFIG_A = {"alpha": 0.5, "beta": 0.3, "gamma": 0.2}
-    DEFAULT_CONFIG_B = {"alpha": 0.3, "beta": 0.5, "gamma": 0.2}
+@dataclass(frozen=True)
+class ExperimentVariant:
+    """One recommendation ranking variant in an experiment."""
 
-    def __init__(
-        self,
-        content_model,
-        collab_model,
-        item_df,
-        config_a=None,
-        config_b=None,
-        k=10,
-    ):
-        self.content_model = content_model
-        self.collab_model = collab_model
-        self.item_df = item_df
-        self.config_a = config_a or self.DEFAULT_CONFIG_A
-        self.config_b = config_b or self.DEFAULT_CONFIG_B
-        self.k = k
-        self.results = {}
+    name: str
+    description: str
+    weights: Mapping[str, float]
+    traffic: int = 1
 
-    # ── Metrics ──────────────────────────────────────────────────────
 
-    @staticmethod
-    def diversity_score(recommendations):
-        """Compute category diversity of a recommendation list.
+DEFAULT_VARIANTS = (
+    ExperimentVariant(
+        name="control",
+        description="Balanced production ranking weights.",
+        weights={"alpha": 0.4, "beta": 0.35, "gamma": 0.25},
+    ),
+    ExperimentVariant(
+        name="content_heavy",
+        description="Prioritizes item metadata similarity.",
+        weights={"alpha": 0.6, "beta": 0.25, "gamma": 0.15},
+    ),
+    ExperimentVariant(
+        name="collaborative_heavy",
+        description="Prioritizes co-purchase and user behavior signals.",
+        weights={"alpha": 0.25, "beta": 0.6, "gamma": 0.15},
+    ),
+    ExperimentVariant(
+        name="sentiment_heavy",
+        description="Prioritizes review sentiment and satisfaction signals.",
+        weights={"alpha": 0.3, "beta": 0.25, "gamma": 0.45},
+    ),
+)
 
-        Returns a score in [0, 1] representing the proportion of unique
-        categories among the recommended items.  Higher = more diverse.
-        """
-        if not recommendations:
-            return 0.0
-        categories = [r.get("category", "") for r in recommendations]
-        unique = set(c for c in categories if c)
-        return len(unique) / len(recommendations) if recommendations else 0.0
 
-    # ── Core runner ──────────────────────────────────────────────────
+def _stable_bucket(experiment_id: str, user_key: str) -> int:
+    digest = hashlib.sha256(f"{experiment_id}:{user_key}".encode("utf-8")).hexdigest()
+    return int(digest[:12], 16)
 
-    def _evaluate_config(self, config, test_pairs):
-        """Evaluate a single weight configuration across all test pairs.
 
-        Returns a dict with averaged precision, recall, ndcg, and diversity.
-        """
-        hybrid = HybridRecommender(
-            self.content_model,
-            self.collab_model,
-            self.item_df,
-            alpha=config["alpha"],
-            beta=config["beta"],
-            gamma=config["gamma"],
+def assign_variant(
+    user_key: str,
+    experiment_id: str = DEFAULT_EXPERIMENT_ID,
+    variants: Iterable[ExperimentVariant] = DEFAULT_VARIANTS,
+) -> ExperimentVariant:
+    """Assign a user to a variant with deterministic weighted bucketing."""
+    variant_list = list(variants)
+    if not variant_list:
+        raise ValueError("At least one experiment variant is required.")
+
+    total_traffic = sum(max(0, variant.traffic) for variant in variant_list)
+    if total_traffic <= 0:
+        raise ValueError("At least one experiment variant must receive traffic.")
+
+    bucket = _stable_bucket(experiment_id, str(user_key)) % total_traffic
+    cumulative = 0
+    for variant in variant_list:
+        cumulative += max(0, variant.traffic)
+        if bucket < cumulative:
+            return variant
+
+    return variant_list[-1]
+
+
+@contextmanager
+def temporary_weights(recommender, weights: Mapping[str, float]):
+    """Apply weights for one recommendation call, then restore originals."""
+    original_weights = recommender.get_weights()
+    recommender.set_weights(
+        weights["alpha"],
+        weights["beta"],
+        weights["gamma"],
+    )
+    try:
+        yield recommender.get_weights()
+    finally:
+        recommender.set_weights(
+            original_weights["alpha"],
+            original_weights["beta"],
+            original_weights["gamma"],
         )
 
-        precisions, recalls, ndcgs, diversities = [], [], [], []
 
-        for _user_id, query_item, relevant_items in test_pairs:
-            recs = hybrid.recommend(query_item, top_n=self.k)
-            rec_titles = [r["title"] for r in recs]
+def run_recommendation_experiment(
+    recommender,
+    title: str,
+    user_key: str,
+    top_n: int = 10,
+    explain: bool = False,
+    experiment_id: str = DEFAULT_EXPERIMENT_ID,
+    variants: Iterable[ExperimentVariant] = DEFAULT_VARIANTS,
+) -> Dict[str, object]:
+    """Return recommendations plus A/B metadata for an opt-in user request."""
+    variant = assign_variant(user_key, experiment_id=experiment_id, variants=variants)
+    with temporary_weights(recommender, variant.weights) as active_weights:
+        recommendations = recommender.recommend(title, top_n=top_n, explain=explain)
 
-            precisions.append(precision_at_k(rec_titles, relevant_items, self.k))
-            recalls.append(recall_at_k(rec_titles, relevant_items, self.k))
-            ndcgs.append(ndcg_at_k(rec_titles, relevant_items, self.k))
-            diversities.append(self.diversity_score(recs))
+    return {
+        "experiment": {
+            "id": experiment_id,
+            "user_key": str(user_key),
+            "variant": variant.name,
+            "description": variant.description,
+            "weights": active_weights,
+        },
+        "recommendations": recommendations,
+    }
 
-        return {
-            "precision": round(float(np.mean(precisions)), 4),
-            "recall": round(float(np.mean(recalls)), 4),
-            "ndcg": round(float(np.mean(ndcgs)), 4),
-            "diversity": round(float(np.mean(diversities)), 4),
-        }
 
-    def run(self, test_pairs):
-        """Run the A/B test on the given test pairs.
+def summarize_variant_metrics(
+    events: Iterable[Mapping[str, object]],
+    metric_name: str = "clicked",
+) -> List[Dict[str, object]]:
+    """
+    Aggregate simple binary/number metrics by experiment variant.
 
-        Parameters
-        ----------
-        test_pairs : list of (user_id, query_item, relevant_items)
-            Evaluation data — one entry per test user.
+    Events are intentionally plain dictionaries so API, cron, or notebook code
+    can reuse the same helper before wiring a permanent analytics store.
+    """
+    aggregates: Dict[str, Dict[str, float]] = {}
+    for event in events:
+        variant = str(event.get("variant", "unknown"))
+        value = float(event.get(metric_name, 0) or 0)
+        row = aggregates.setdefault(variant, {"count": 0, "total": 0.0})
+        row["count"] += 1
+        row["total"] += value
 
-        Returns
-        -------
-        dict with keys ``config_a``, ``config_b``, ``winner``.
-        """
-        if not test_pairs:
-            print("  ⚠  No test pairs provided. Cannot run A/B test.")
-            return {}
-
-        print(f"\n  Running Config A  (α={self.config_a['alpha']}, "
-              f"β={self.config_a['beta']}, γ={self.config_a['gamma']}) ...")
-        metrics_a = self._evaluate_config(self.config_a, test_pairs)
-
-        print(f"  Running Config B  (α={self.config_b['alpha']}, "
-              f"β={self.config_b['beta']}, γ={self.config_b['gamma']}) ...")
-        metrics_b = self._evaluate_config(self.config_b, test_pairs)
-
-        # Determine winner by NDCG (primary), then precision (tiebreak)
-        if metrics_a["ndcg"] > metrics_b["ndcg"]:
-            winner = "A"
-        elif metrics_b["ndcg"] > metrics_a["ndcg"]:
-            winner = "B"
-        elif metrics_a["precision"] >= metrics_b["precision"]:
-            winner = "A"
-        else:
-            winner = "B"
-
-        self.results = {
-            "config_a": {**self.config_a, **metrics_a},
-            "config_b": {**self.config_b, **metrics_b},
-            "winner": winner,
-            "k": self.k,
-            "test_users": len(test_pairs),
-        }
-
-        return self.results
-
-    # ── Display ──────────────────────────────────────────────────────
-
-    def print_results(self):
-        """Print a formatted comparison table to stdout."""
-        if not self.results:
-            print("  No results yet. Call run() first.")
-            return
-
-        r = self.results
-        a = r["config_a"]
-        b = r["config_b"]
-        k = r["k"]
-
-        print(f"\n{'=' * 72}")
-        print(f"  A/B TEST RESULTS — Top-{k} Recommendations")
-        print(f"  Test users: {r['test_users']}")
-        print(f"{'=' * 72}\n")
-
-        header = f"  {'Metric':<20s} {'Config A':>12s} {'Config B':>12s} {'Better':>10s}"
-        print(header)
-        print(f"  {'-' * 56}")
-
-        rows = [
-            ("Weights (α/β/γ)",
-             f"{a['alpha']}/{a['beta']}/{a['gamma']}",
-             f"{b['alpha']}/{b['beta']}/{b['gamma']}",
-             ""),
-            (f"Precision@{k}", f"{a['precision']:.4f}", f"{b['precision']:.4f}",
-             "A" if a["precision"] > b["precision"] else ("B" if b["precision"] > a["precision"] else "Tie")),
-            (f"Recall@{k}", f"{a['recall']:.4f}", f"{b['recall']:.4f}",
-             "A" if a["recall"] > b["recall"] else ("B" if b["recall"] > a["recall"] else "Tie")),
-            (f"NDCG@{k}", f"{a['ndcg']:.4f}", f"{b['ndcg']:.4f}",
-             "A" if a["ndcg"] > b["ndcg"] else ("B" if b["ndcg"] > a["ndcg"] else "Tie")),
-            ("Diversity", f"{a['diversity']:.4f}", f"{b['diversity']:.4f}",
-             "A" if a["diversity"] > b["diversity"] else ("B" if b["diversity"] > a["diversity"] else "Tie")),
-        ]
-
-        for label, va, vb, better in rows:
-            print(f"  {label:<20s} {va:>12s} {vb:>12s} {better:>10s}")
-
-        print(f"\n  ★ Winner: Config {r['winner']}")
-        print(f"{'=' * 72}\n")
-
-    # ── results.md generation ────────────────────────────────────────
-
-    def write_results_md(self, filepath=None):
-        """Write A/B test results to a Markdown file.
-
-        Parameters
-        ----------
-        filepath : str or None
-            Path to write the results file.  Defaults to ``results.md``
-            in the project root.
-        """
-        if not self.results:
-            print("  No results to write. Call run() first.")
-            return
-
-        if filepath is None:
-            filepath = os.path.join(os.path.dirname(__file__), "results.md")
-
-        r = self.results
-        a = r["config_a"]
-        b = r["config_b"]
-        k = r["k"]
-
-        lines = [
-            f"# A/B Test Results",
-            f"",
-            f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
-            f"**Test users:** {r['test_users']}  ",
-            f"**Top-K:** {k}",
-            f"",
-            f"## Weight Configurations",
-            f"",
-            f"| Config | Alpha (Content) | Beta (Collab) | Gamma (Sentiment) |",
-            f"|--------|:-:|:-:|:-:|",
-            f"| **A** | {a['alpha']} | {a['beta']} | {a['gamma']} |",
-            f"| **B** | {b['alpha']} | {b['beta']} | {b['gamma']} |",
-            f"",
-            f"## Metrics Comparison",
-            f"",
-            f"| Metric | Config A | Config B | Winner |",
-            f"|--------|:-:|:-:|:-:|",
-        ]
-
-        metrics = [
-            (f"Precision@{k}", a["precision"], b["precision"]),
-            (f"Recall@{k}", a["recall"], b["recall"]),
-            (f"NDCG@{k}", a["ndcg"], b["ndcg"]),
-            ("Diversity", a["diversity"], b["diversity"]),
-        ]
-
-        for label, va, vb in metrics:
-            if va > vb:
-                winner = "✅ A"
-            elif vb > va:
-                winner = "✅ B"
-            else:
-                winner = "Tie"
-            lines.append(f"| {label} | {va:.4f} | {vb:.4f} | {winner} |")
-
-        lines += [
-            f"",
-            f"## Conclusion",
-            f"",
-            f"**Config {r['winner']}** performed better overall "
-            f"(primary metric: NDCG@{k}).",
-            f"",
-        ]
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-
-        print(f"  Results written to {filepath}")
+    summary = []
+    for variant, row in sorted(aggregates.items()):
+        count = int(row["count"])
+        total = row["total"]
+        summary.append(
+            {
+                "variant": variant,
+                "count": count,
+                "total": round(total, 4),
+                "average": round(total / count, 4) if count else 0.0,
+            }
+        )
+    return summary

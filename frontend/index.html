@@ -4,6 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="HybridRec — AI-powered product recommendations using content, collaborative, and sentiment analysis.">
+
+    <meta property="og:title" content="HybridRec — Hybrid Recommender System" />
+    <meta property="og:description" content="A hybrid recommender fusing TF-IDF, SVD, and VADER sentiment analysis to deliver personalised product recommendations." />
+    <meta property="og:type" content="website" />
+
     <title>HybridRec — Smart Recommendations</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -209,6 +214,9 @@
             <div class="skeleton-card"><div class="skeleton-image"></div><div class="skeleton-line w70"></div><div class="skeleton-line w50"></div><div class="skeleton-line w90"></div></div>
         </div>
     </main>
+    <div id="compare-panel" class="compare-panel">
+    <div id="compare-content"></div>
+</div>
 
     <!-- Toast Container -->
     <div class="toast-container" id="toast-container"></div>
@@ -220,7 +228,33 @@
     <footer style="text-align:center; margin-top:40px;">
     <a href="/dashboard.html">Admin Dashboard</a>
     </footer>
+    <div id="saveToast" class="save-toast">
+    Preferences saved
+    </div>
 
+    <div class="footer-left">
+      <h3>Hybrid Recommender System</h3>
+      <p>Smart product recommendations powered by AI</p>
+    </div>
+
+    <div class="footer-right">
+      <a
+        href="https://github.com/your-username/hybrid-recommender"
+        target="_blank"
+      >
+        GitHub Repository
+      </a>
+
+      <img
+        src="https://gssoc.girlscript.tech/badges/postman.png"
+        alt="GSSoC Badge"
+        class="gssoc-badge"
+      />
+    </div>
+
+  </div>
+</footer>
+</div>
     <script src="/static/app.js"></script>
     <button id="backToTop" class="back-to-top" style="display: none;">↑ Top</button>
 </body>
