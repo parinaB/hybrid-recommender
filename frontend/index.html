@@ -154,8 +154,15 @@
                 <span class="product-count" id="product-count"></span>
             </div>
             <div class="product-grid" id="product-grid"></div>
-            <div class="load-more" id="load-more-container" hidden>
-                <button class="btn btn--outline" id="load-more-btn">Load More</button>
+            <!-- Infinite-scroll sentinel (observed by IntersectionObserver) -->
+            <div id="scroll-sentinel" aria-hidden="true"></div>
+            <div class="infinite-scroll-loader" id="infinite-scroll-loader" hidden>
+                <div class="spinner" role="status"></div>
+                <span class="infinite-scroll-loader__text">Loading more products…</span>
+            </div>
+            <div class="infinite-scroll-end" id="infinite-scroll-end" hidden>
+                <span class="infinite-scroll-end__icon">✓</span>
+                <span class="infinite-scroll-end__text">No more products</span>
             </div>
         </section>
 
@@ -171,6 +178,9 @@
             <div class="skeleton-card"><div class="skeleton-image"></div><div class="skeleton-line w70"></div><div class="skeleton-line w50"></div><div class="skeleton-line w90"></div></div>
         </div>
     </main>
+    <div id="compare-panel" class="compare-panel">
+    <div id="compare-content"></div>
+</div>
 
     <!-- Toast Container -->
     <div class="toast-container" id="toast-container"></div>
@@ -179,8 +189,12 @@
         <p>&copy; 2026 HybridRec — Powered by TF-IDF, SVD, VADER &amp; PostgreSQL FTS</p>
         <p><a href="/dashboard.html" class="footer__link">Admin Dashboard</a></p>
     </footer>
+    <footer style="text-align:center; margin-top:40px;">
+    <a href="/dashboard.html">Admin Dashboard</a>
+    </footer>
 
     <script src="/static/app.js"></script>
     <button id="backToTop" class="back-to-top" style="display: none;">↑ Top</button>
 </body>
 </html>
+

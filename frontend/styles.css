@@ -793,10 +793,61 @@ body {
     100% { background-position: 200% 0; }
 }
 
-/* ── Load More ───────────────────────────────────────────────────── */
-.load-more {
-    text-align: center;
-    margin-top: 32px;
+/* ── Infinite Scroll ─────────────────────────────────────────────── */
+#scroll-sentinel {
+    width: 100%;
+    height: 1px;
+    pointer-events: none;
+}
+
+.infinite-scroll-loader {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+    gap: 12px;
+    width: 100%;
+}
+
+.infinite-scroll-loader__text {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.infinite-scroll-end {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 32px 16px;
+    width: 100%;
+}
+
+.infinite-scroll-end__icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--success);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.infinite-scroll-end__text {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-muted);
 }
 
 /* ── Compare Checkbox (Product Card) ─────────────────────────────── */

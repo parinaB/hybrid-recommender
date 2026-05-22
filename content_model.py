@@ -34,6 +34,12 @@ class ContentRecommender:
         }
 
     def recommend(self, title, top_n=10):
+        """
+        Get content-based recommendations for a given item title.
+        Returns list of dicts: [{ 'title', 'content_score' }, ...]
+        """
+        if title.lower() not in self._title_to_idx:
+            return []
 
         title_key = title.lower()
 
