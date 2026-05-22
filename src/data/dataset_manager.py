@@ -13,10 +13,15 @@ Fixes vs. original:
 
 import os
 import uuid
+<<<<<<< HEAD:dataset_manager.py
 import pandas as pd
 
 from data_adapter import adapt_data, read_file
 from data_preprocessing import preprocess
+=======
+from src.data.data_adapter import adapt_data
+from src.data.data_preprocessing import preprocess
+>>>>>>> 02ba2da92a7fd47032dcb195a0bd501359160b59:src/data/dataset_manager.py
 
 
 class DatasetManager:

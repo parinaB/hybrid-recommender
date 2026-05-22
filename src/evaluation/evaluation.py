@@ -25,6 +25,11 @@ from nlp_engine import batch_analyze, aggregate_sentiment_by_item
 from content_model import ContentRecommender
 from collaborative_model import get_collaborative_recommender
 from hybrid_model import HybridRecommender
+from src.data.dataset_manager import DatasetManager
+from src.model.nlp_engine import batch_analyze, aggregate_sentiment_by_item
+from src.model.content_model import ContentRecommender
+from src.model.collaborative_model import CollaborativeRecommender
+from src.model.hybrid_model import HybridRecommender
 
 
 # ─────────────────────────────────────────────
@@ -50,6 +55,44 @@ def ndcg_at_k(rec, rel, k):
 # ─────────────────────────────────────────────
 #  Title resolution helpers
 # ─────────────────────────────────────────────
+def average_precision_at_k(recommended, relevant, k):
+    """Average Precision @ K for a single query."""
+    rec_k = recommended[:k]
+    hits = 0
+    sum_precisions = 0.0
+    for i, item in enumerate(rec_k):
+        if item in relevant:
+            hits += 1
+            sum_precisions += hits / (i + 1)
+    
+    return sum_precisions / min(len(relevant), k) if relevant else 0.0
+
+
+def evaluate():
+    """Run the full evaluation pipeline."""
+    # 1. Load data
+    dm = DatasetManager()
+    data_dir = os.path.join(os.path.dirname(__file__), 'datasets')
+    
+    # Try to load all user-provided datasets first
+    datasets_to_load = ['books.csv', 'booksdata.csv', 'ratings.csv']
+    loaded_any = False
+    
+    for filename in datasets_to_load:
+        filepath = os.path.join(data_dir, filename)
+        if os.path.exists(filepath):
+            print(f"Loading dataset: {filename}...")
+            dm.load_csv(filepath)
+            loaded_any = True
+            
+    # Fallback to sample data if no user datasets found
+    if not loaded_any:
+        sample_file = os.path.join(data_dir, 'sample_products.csv')
+        if not os.path.exists(sample_file):
+            print("ERROR: datasets not found. Run: python scripts/generate_sample_data.py")
+            return
+        print("Loading sample_products.csv...")
+        dm.load_csv(sample_file)
 
 def build_id_to_title_map(interaction_df):
     """
