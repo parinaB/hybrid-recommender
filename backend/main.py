@@ -31,6 +31,7 @@ from collections import Counter
 from pydantic import BaseModel
 from typing import Any, Optional
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -504,6 +505,13 @@ def dashboard(
         "model_last_trained": models.get("last_trained_at"),
     }
 
+@app.get("/api/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "model_loaded": models["ready"]
+    }
 
 # ── Search (PostgreSQL FTS) ─────────────────────────────────────────
 @app.get("/api/search")
