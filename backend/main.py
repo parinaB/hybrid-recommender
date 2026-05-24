@@ -557,12 +557,24 @@ def dashboard(
     total_users = 0
     purchase_counts: Counter = Counter()
     try:
+        user_rows = sb.table('purchases') \
+          .select('user_id') \
+          .execute().data or []
+
+        total_users = len({
+          row['user_id']
+          for row in user_rows
+          if row.get('user_id')
+        })
+
         purchase_rows = sb.table('purchases') \
-            .select('user_id, product_id') \
-            .limit(50000).execute().data or []
-        total_users = len({r['user_id'] for r in purchase_rows if r.get('user_id')})
+          .select('product_id') \
+          .limit(50000).execute().data or []
+
         purchase_counts = Counter(
-            r['product_id'] for r in purchase_rows if r.get('product_id') is not None
+          r['product_id']
+          for r in purchase_rows
+          if r.get('product_id') is not None
         )
     except Exception as e:
         logger.warning("Dashboard: purchases scan failed: %s", e)
