@@ -61,6 +61,9 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 MAX_SEARCH_QUERY_LENGTH = 120
 _response_cache: dict = {}
 ADMIN_API_TOKEN_ENV = "ADMIN_API_TOKEN"
+_rate_limit_buckets: dict = {}
+_rate_limit_lock = Lock()
+_cache_lock = Lock()
 
 
 def _get_slow_response_threshold_ms() -> float:
@@ -75,22 +78,25 @@ def _cache_key(*parts: Any) -> str:
 
 
 def _get_cached_response(key: str):
-    cached = _response_cache.get(key)
-    if not cached:
-        return None
-    expires_at, value = cached
-    if expires_at <= time.time():
-        _response_cache.pop(key, None)
-        return None
-    return value
+    with _cache_lock:
+        cached = _response_cache.get(key)
+        if not cached:
+            return None
+        expires_at, value = cached
+        if expires_at <= time.time():
+            _response_cache.pop(key, None)
+            return None
+        return value
 
 
 def _set_cached_response(key: str, value: Any) -> None:
-    _response_cache[key] = (time.time() + CACHE_TTL_SECONDS, value)
+    with _cache_lock:
+        _response_cache[key] = (time.time() + CACHE_TTL_SECONDS, value)
 
 
 def _clear_response_cache() -> None:
-    _response_cache.clear()
+    with _cache_lock:
+        _response_cache.clear()
 
 
 def _normalize_search_query(query: str) -> str:
@@ -140,10 +146,13 @@ def _require_admin_access(request: Request) -> None:
 
 
 # CORS
-allowed_origins = os.environ.get("CORS_ORIGINS", "*").split(",")
+allowed_origins_env = os.environ.get("CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000")
+allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -175,8 +184,19 @@ def record_response_metric(endpoint, method, status_code, response_time_ms):
             response_metrics["error_requests"] += 1
         response_time_samples.append(response_time_ms)
     log_level = logging.WARNING if response_time_ms > SLOW_RESPONSE_THRESHOLD_MS else logging.INFO
-    logger.log(log_level, "API request endpoint=%s method=%s status=%s time=%.2fms",
-               endpoint, method, status_code, response_time_ms)
+    if log_level == logging.WARNING:
+        logger.warning("API request slow endpoint=%s method=%s status=%s time=%.2fms response_time_ms=%.2f endpoint=%s",
+                       endpoint, method, status_code, response_time_ms, response_time_ms, endpoint)
+    else:
+        logger.info("API request endpoint=%s method=%s status=%s time=%.2fms",
+                    endpoint, method, status_code, response_time_ms)
+
+
+def reset_response_metrics():
+    with response_metrics_lock:
+        response_metrics["total_requests"] = 0
+        response_metrics["error_requests"] = 0
+        response_time_samples.clear()
 
 
 def get_response_metrics_snapshot():
@@ -220,6 +240,25 @@ models = {
     "build_time": None,
     "last_trained_at": None,
 }
+
+
+class RealtimeConnectionHub:
+    def __init__(self):
+        self.active_connections = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            await connection.send_json(message)
+
+realtime_hub = RealtimeConnectionHub()
 
 
 class WeightsUpdate(BaseModel):
@@ -388,13 +427,46 @@ def dashboard(request: Request):
 # ── Search ────────────────────────────────────────────────────────────
 @app.get("/api/search")
 def search_items(
+    request: Request,
     response: Response,
     q: str = "",
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    query = _normalize_search_query(q)
-    cache_key = _cache_key("search", query, limit, offset)
+    # ── Rate Limiting ──
+    try:
+        rate_limit = int(os.environ.get("RATE_LIMIT_SEARCH_PER_MIN", "60"))
+    except ValueError:
+        rate_limit = 60
+
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    now = time.time()
+
+    with _rate_limit_lock:
+        bucket = _rate_limit_buckets.setdefault(client_ip, {"timestamps": []})
+        bucket["timestamps"] = [t for t in bucket["timestamps"] if now - t < 60]
+
+        if len(bucket["timestamps"]) >= rate_limit:
+            reset_time = int(60 - (now - bucket["timestamps"][0])) if bucket["timestamps"] else 60
+            reset_time = max(0, reset_time)
+            response.status_code = 429
+            response.headers["x-ratelimit-limit"] = str(rate_limit)
+            response.headers["x-ratelimit-remaining"] = "0"
+            response.headers["x-ratelimit-reset"] = str(reset_time)
+            return {
+                "error": "Rate limit exceeded",
+                "message": "Too many requests. Please try again later.",
+            }
+
+        bucket["timestamps"].append(now)
+        remaining = rate_limit - len(bucket["timestamps"])
+        reset_time = int(60 - (now - bucket["timestamps"][0])) if bucket["timestamps"] else 60
+        reset_time = max(0, reset_time)
+        response.headers["x-ratelimit-limit"] = str(rate_limit)
+        response.headers["x-ratelimit-remaining"] = str(remaining)
+        response.headers["x-ratelimit-reset"] = str(reset_time)
+
+    cache_key = _cache_key("search", q, limit, offset)
     cached = _get_cached_response(cache_key)
     if cached is not None:
         _set_cache_headers(response, "HIT")
@@ -623,6 +695,53 @@ def get_recommendations(
     _set_cached_response(cache_key, payload)
     _set_cache_headers(response, "MISS")
     return payload
+
+
+@app.websocket("/ws/recommendations")
+async def websocket_recommendations(websocket: WebSocket):
+    await realtime_hub.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            item_title = data.get("item_title")
+            top_n = data.get("top_n", 10)
+            explain = data.get("explain", False)
+            user_id = data.get("user_id")
+
+            if not models.get("ready") or not models.get("hybrid"):
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Models not built yet."
+                })
+                continue
+
+            recs = models["hybrid"].recommend(item_title, user_id=user_id, top_n=top_n, explain=explain)
+            await websocket.send_json({
+                "type": "recommendations",
+                "query_item": item_title,
+                "recommendations": recs
+            })
+    except WebSocketDisconnect:
+        realtime_hub.disconnect(websocket)
+    except Exception as e:
+        logger.error("WebSocket error: %s", e)
+        try:
+            realtime_hub.disconnect(websocket)
+        except Exception:
+            pass
+
+
+@app.post("/api/realtime/behavior")
+def realtime_behavior(req: RealtimeRecommendationRequest):
+    if not models.get("ready") or not models.get("hybrid"):
+        raise HTTPException(status_code=400, detail="Models not built yet. Train the models first.")
+
+    recs = models["hybrid"].recommend(req.item_title, top_n=req.top_n, explain=req.explain)
+    return {
+        "type": "recommendations",
+        "query_item": req.item_title,
+        "recommendations": recs
+    }
 
 
 def _json_scalar(value):
