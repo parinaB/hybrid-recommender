@@ -332,17 +332,23 @@ class CollaborativeRecommender:
         density = (self.user_item_sparse.nnz / (n_users * n_items)
                    if (n_users * n_items) > 0 else 0)
 
-        if density < 0.001:
-            n_components = min(20, min_dim - 1)
-        elif density < 0.01:
-            n_components = min(30, min_dim - 1)
+        if min_dim <= 1:
+            self.svd = None
+            self.user_factors = np.ones((n_users, 1))
+            self.item_factors = np.ones((1, n_items))
         else:
-            n_components = min(n_factors, min_dim - 1)
-        n_components = max(1, n_components)
+            if density < 0.001:
+                n_components = min(20, min_dim - 1)
+            elif density < 0.01:
+                n_components = min(30, min_dim - 1)
+            else:
+                n_components = min(n_factors, min_dim - 1)
 
-        self.svd          = TruncatedSVD(n_components=n_components, random_state=42)
-        self.user_factors = self.svd.fit_transform(self.user_item_sparse)
-        self.item_factors = self.svd.components_
+            n_components = max(1, n_components)
+
+            self.svd = TruncatedSVD(n_components=n_components, random_state=42)
+            self.user_factors = self.svd.fit_transform(self.user_item_sparse)
+            self.item_factors = self.svd.components_
 
     def recommend(self, title, top_n=10):
         if title not in self._title_to_idx:
